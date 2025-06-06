@@ -73,7 +73,7 @@ def get_line_height(draw, font):
     bbox = draw.textbbox((0, 0), "Ay", font=font)
     return bbox[3] - bbox[1] + 10
 
-def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", max_font_size=70, min_font_size=20):
+def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", max_font_size=200, min_font_size=100):
     for size in range(max_font_size, min_font_size - 1, -2):
         try:
             font = ImageFont.truetype(base_font_path, size)
