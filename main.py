@@ -69,6 +69,10 @@ def wrap_text(draw, text, font, max_width):
         lines.append(current_line)
     return lines
 
+def get_line_height(draw, font):
+    bbox = draw.textbbox((0, 0), "Ay", font=font)
+    return bbox[3] - bbox[1] + 10
+
 def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", max_font_size=70, min_font_size=20):
     for size in range(max_font_size, min_font_size - 1, -2):
         try:
@@ -76,7 +80,7 @@ def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", max_fon
         except:
             font = ImageFont.load_default()
         lines = wrap_text(draw, text, font, max_width)
-        line_height = font.getsize("A")[1] + 10
+        line_height = get_line_height(draw, font)
         total_height = len(lines) * line_height
         if total_height < 300:
             return font, lines
@@ -106,7 +110,7 @@ def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_p
         words_to_show = int(current_time / word_duration) + 1
         current_text = " ".join(words[:min(words_to_show, len(words))])
         font, lines = get_font_for_text(draw, current_text, max_width=w - 100)
-        line_height = font.getsize("A")[1] + 10
+        line_height = get_line_height(draw, font)
         total_text_height = len(lines) * line_height
         y_text = h - total_text_height - 100
 
@@ -116,7 +120,8 @@ def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_p
         draw.rectangle([(0, rect_top), (w, rect_bottom)], fill=(0, 0, 0, 128))
 
         for line in lines:
-            text_width = draw.textlength(line, font=font)
+            bbox = draw.textbbox((0, 0), line, font=font)
+            text_width = bbox[2] - bbox[0]
             x_text = (w - text_width) // 2
             draw.text((x_text, y_text), line, font=font, fill="white", stroke_width=2, stroke_fill="black")
             y_text += line_height
