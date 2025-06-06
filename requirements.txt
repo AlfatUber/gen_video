@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+requests
+opencv-python-headless
+numpy
+pillow
+gTTS
+langdetect
+pydub
+python-multipart
