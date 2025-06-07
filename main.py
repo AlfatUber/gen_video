@@ -38,7 +38,7 @@ def split_prompt(prompt: str, words_per_section: int = 5) -> list:
 
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
     try:
-        url = f"http://localhost:8000/proxy_image?prompt={requests.utils.quote(prompt)}&width={width}&height={height}"
+        url = f"https://gen-video.onrender.com/proxy_image?prompt={requests.utils.quote(prompt)}&width={width}&height={height}"
         response = requests.get(url, timeout=30)
         response.raise_for_status()
 
