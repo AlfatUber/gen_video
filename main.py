@@ -30,7 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-executor = ThreadPoolExecutor(max_workers=10)
+executor = ThreadPoolExecutor(max_workers=4)
 
 def split_prompt(prompt: str, words_per_section: int = 5) -> list:
     words = prompt.split()
@@ -38,14 +38,19 @@ def split_prompt(prompt: str, words_per_section: int = 5) -> list:
 
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
     try:
-        url = f"https://gen-video.onrender.com/proxy_image?prompt={requests.utils.quote(prompt)}&width={width}&height={height}"
-        response = requests.get(url, timeout=20)
+        url = f"http://localhost:8000/proxy_image?prompt={requests.utils.quote(prompt)}&width={width}&height={height}"
+        response = requests.get(url, timeout=30)
         response.raise_for_status()
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Image proxy failed: {e}")
-    
-    image = np.array(Image.open(BytesIO(response.content)))
-    return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+        content_type = response.headers.get('Content-Type', '')
+        if not content_type.startswith("image"):
+            raise ValueError(f"Contenu inattendu : {content_type}")
+
+        image = Image.open(BytesIO(response.content))
+        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur image : {e}")
 
 
 def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
