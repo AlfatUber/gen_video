@@ -10,7 +10,7 @@ from langdetect import detect
 from pydub import AudioSegment
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
@@ -37,14 +37,16 @@ def split_prompt(prompt: str, words_per_section: int = 5) -> list:
     return [" ".join(words[i:i+words_per_section]) for i in range(0, len(words), words_per_section)]
 
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
-    encoded_prompt = requests.utils.quote(prompt)
-    seed = random.randint(1, 1_000_000)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Image generation failed")
+    try:
+        url = f"https://gen-video.onrender.com/proxy_image?prompt={requests.utils.quote(prompt)}&width={width}&height={height}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Image proxy failed: {e}")
+    
     image = np.array(Image.open(BytesIO(response.content)))
     return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
 
 def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
     if lang is None:
@@ -204,6 +206,22 @@ async def get_video(video_id: str):
         shutil.rmtree(folder_path, ignore_errors=True)
 
     return StreamingResponse(cleanup_and_stream(), media_type="video/mp4", headers={"Content-Disposition": "attachment; filename=tiktok_video.mp4"})
+
+from fastapi.responses import Response
+
+@app.get("/proxy_image")
+def proxy_image(prompt: str, width: int = 720, height: int = 1280):
+    encoded_prompt = requests.utils.quote(prompt)
+    seed = random.randint(1, 1_000_000)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
+
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération de l'image : {str(e)}")
+
+    return Response(content=resp.content, media_type="image/jpeg")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
