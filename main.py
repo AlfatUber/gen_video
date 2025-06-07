@@ -10,7 +10,7 @@ from langdetect import detect
 from pydub import AudioSegment
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
@@ -18,7 +18,6 @@ import subprocess
 import asyncio
 import json
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
@@ -30,28 +29,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-executor = ThreadPoolExecutor(max_workers=4)
-
 def split_prompt(prompt: str, words_per_section: int = 5) -> list:
     words = prompt.split()
     return [" ".join(words[i:i+words_per_section]) for i in range(0, len(words), words_per_section)]
 
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
-    try:
-        url = f"https://gen-video.onrender.com/proxy_image?prompt={requests.utils.quote(prompt)}&width={width}&height={height}"
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-
-        content_type = response.headers.get('Content-Type', '')
-        if not content_type.startswith("image"):
-            raise ValueError(f"Contenu inattendu : {content_type}")
-
-        image = Image.open(BytesIO(response.content))
-        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur image : {e}")
-
+    encoded_prompt = requests.utils.quote(prompt)
+    seed = random.randint(1, 1_000_000)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Image generation failed")
+    image = np.array(Image.open(BytesIO(response.content)))
+    return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
 def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
     if lang is None:
@@ -59,6 +49,7 @@ def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
             lang = detect(text)
         except:
             lang = 'fr'
+
     tts = gTTS(text=text, lang=lang, slow=False)
     tts.save(output_path)
     return output_path
@@ -156,14 +147,6 @@ def concatenate_videos(video_paths: list, output_path: str):
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file, '-c', 'copy', output_path], check=True)
     os.remove(list_file)
 
-def process_section(section, index, temp_dir):
-    img = generate_image(section)
-    audio_path = os.path.join(temp_dir, f"audio_{index}.mp3")
-    generate_audio(section, output_path=audio_path)
-    segment_path = os.path.join(temp_dir, f"segment_{index}.mp4")
-    create_video_segment(img, audio_path, section, segment_path)
-    return index, segment_path
-
 @app.get("/progress")
 async def progress_endpoint(request: Request, prompt: str):
     uid = str(uuid.uuid4())
@@ -174,25 +157,23 @@ async def progress_endpoint(request: Request, prompt: str):
     async def event_generator():
         sections = split_prompt(prompt)
         total = len(sections)
-        loop = asyncio.get_event_loop()
-        tasks = []
-        video_segments = [None] * total
+        video_segments = []
 
         try:
             for i, section in enumerate(sections):
-                task = loop.run_in_executor(executor, process_section, section, i, temp_dir)
-                tasks.append(task)
-
-            for future in asyncio.as_completed(tasks):
-                index, segment_path = await future
-                video_segments[index] = segment_path
-                progress = int(((sum(s is not None for s in video_segments)) / total) * 90)
-                yield f"data: {json.dumps({'progress': progress, 'status': 'processing'})}\n\n"
+                yield f"data: {json.dumps({'progress': int((i / total) * 100), 'status': 'processing'})}\n\n"
+                img = generate_image(section)
+                audio_path = os.path.join(temp_dir, f"audio_{i}.mp3")
+                generate_audio(section, output_path=audio_path)
+                segment_path = os.path.join(temp_dir, f"segment_{i}.mp4")
+                create_video_segment(img, audio_path, section, segment_path)
+                video_segments.append(segment_path)
+                yield f"data: {json.dumps({'progress': int(((i+1) / total) * 100), 'status': 'processing'})}\n\n"
+                await asyncio.sleep(0.1)
 
             yield f"data: {json.dumps({'progress': 95, 'status': 'processing'})}\n\n"
             concatenate_videos(video_segments, video_output)
             yield f"data: {json.dumps({'progress': 100, 'status': 'done', 'video_id': uid})}\n\n"
-
         except Exception as e:
             yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
 
@@ -211,23 +192,6 @@ async def get_video(video_id: str):
         shutil.rmtree(folder_path, ignore_errors=True)
 
     return StreamingResponse(cleanup_and_stream(), media_type="video/mp4", headers={"Content-Disposition": "attachment; filename=tiktok_video.mp4"})
-
-from fastapi.responses import Response
-
-@app.get("/proxy_image")
-def proxy_image(prompt: str, width: int = 720, height: int = 1280):
-    encoded_prompt = requests.utils.quote(prompt)
-    seed = random.randint(1, 1_000_000)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
-
-    for attempt in range(5): 
-        try:
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            return Response(content=resp.content, media_type="image/jpeg")
-        except Exception as e:
-            print(f"[Tentative {attempt+1}/3] Erreur image : {e}")
-
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
