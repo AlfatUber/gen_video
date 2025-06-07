@@ -1,4 +1,3 @@
-
 import os
 import random
 import tempfile
@@ -6,7 +5,6 @@ import shutil
 import requests
 import cv2
 import numpy as np
-import time
 from gtts import gTTS
 from langdetect import detect
 from pydub import AudioSegment
@@ -20,7 +18,6 @@ import subprocess
 import asyncio
 import json
 import uuid
-from requests.exceptions import RequestException
 
 app = FastAPI()
 
@@ -32,42 +29,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def log(message):
-    print(f"[{time.strftime('%H:%M:%S')}] {message}")
-
-def split_prompt(prompt: str, words_per_section: int = 5) -> list:
+def split_prompt_limited(prompt: str, max_images: int = 10, words_per_section: int = 5) -> list:
     words = prompt.split()
-    return [" ".join(words[i:i+words_per_section]) for i in range(0, len(words), words_per_section)]
+    sections = [" ".join(words[i:i+words_per_section]) for i in range(0, len(words), words_per_section)]
+
+    if len(sections) <= max_images:
+        return [[s] for s in sections]
+
+    # Regrouper les sections en max_images groupes (chunks)
+    chunk_size = len(sections) // max_images
+    remainder = len(sections) % max_images
+
+    grouped_sections = []
+    start = 0
+    for i in range(max_images):
+        end = start + chunk_size + (1 if i < remainder else 0)
+        grouped_sections.append(sections[start:end])
+        start = end
+    return grouped_sections
 
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
-    try:
-        encoded_prompt = requests.utils.quote(prompt)
-        seed = random.randint(1, 1_000_000)
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        image = np.array(Image.open(BytesIO(response.content)))
-        return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    except RequestException as e:
-        log(f"Erreur image : {e}")
-        raise HTTPException(status_code=500, detail="Erreur génération image")
+    encoded_prompt = requests.utils.quote(prompt)
+    seed = random.randint(1, 1_000_000)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Image generation failed")
+    image = np.array(Image.open(BytesIO(response.content)))
+    return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
 def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
-    try:
-        if lang is None:
-            try:
-                lang = detect(text)
-            except:
-                lang = 'fr'
-        tts = gTTS(text=text, lang=lang, slow=False)
-        tts.save(output_path)
-        audio = AudioSegment.from_mp3(output_path)
-        audio = audio.speedup(playback_speed=1.3)
-        audio.export(output_path, format="mp3")
-        return output_path
-    except Exception as e:
-        log(f"Erreur audio : {e}")
-        raise HTTPException(status_code=500, detail="Erreur génération audio")
+    if lang is None:
+        try:
+            lang = detect(text)
+        except:
+            lang = 'fr'
+
+    tts = gTTS(text=text, lang=lang, slow=False)
+    tts.save(output_path)
+    return output_path
 
 def wrap_text(draw, text, font, max_width):
     words = text.split()
@@ -102,72 +102,65 @@ def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", max_fon
     return font, wrap_text(draw, text, font, max_width)
 
 def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_path: str):
-    try:
-        fps = 20
-        audio = AudioSegment.from_mp3(audio_path)
-        audio_duration = len(audio) / 1000.0
-        total_frames = int(audio_duration * fps)
-        h, w = image.shape[:2]
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-        words = text.split()
-        word_duration = audio_duration / max(len(words), 1)
+    fps = 30
+    audio = AudioSegment.from_mp3(audio_path)
+    audio_duration = len(audio) / 1000.0
+    total_frames = int(audio_duration * fps)
+    h, w = image.shape[:2]
+    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+    words = text.split()
+    word_duration = audio_duration / max(len(words), 1)
 
-        for frame_idx in range(total_frames):
-            current_time = frame_idx / fps
-            zoom_factor = 1.0 + (0.1 * (current_time / audio_duration))
-            zoomed = cv2.resize(image, None, fx=zoom_factor, fy=zoom_factor)
-            zh, zw = zoomed.shape[:2]
-            x1, y1 = (zw - w) // 2, (zh - h) // 2
-            zoomed = zoomed[y1:y1+h, x1:x1+w]
+    for frame_idx in range(total_frames):
+        current_time = frame_idx / fps
+        zoom_factor = 1.0 + (0.1 * (current_time / audio_duration))
+        zoomed = cv2.resize(image, None, fx=zoom_factor, fy=zoom_factor)
+        zh, zw = zoomed.shape[:2]
+        x1, y1 = (zw - w) // 2, (zh - h) // 2
+        zoomed = zoomed[y1:y1+h, x1:x1+w]
 
-            pil_img = Image.fromarray(cv2.cvtColor(zoomed, cv2.COLOR_BGR2RGB))
-            draw = ImageDraw.Draw(pil_img)
+        pil_img = Image.fromarray(cv2.cvtColor(zoomed, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
 
-            words_to_show = int(current_time / word_duration) + 1
-            current_text = " ".join(words[:min(words_to_show, len(words))])
-            font, lines = get_font_for_text(draw, current_text, max_width=w - 100)
-            line_height = get_line_height(draw, font)
-            total_text_height = len(lines) * line_height
-            y_text = h - total_text_height - 100
+        words_to_show = int(current_time / word_duration) + 1
+        current_text = " ".join(words[:min(words_to_show, len(words))])
+        font, lines = get_font_for_text(draw, current_text, max_width=w - 100)
+        line_height = get_line_height(draw, font)
+        total_text_height = len(lines) * line_height
+        y_text = h - total_text_height - 100
 
-            margin = 30
-            rect_top = y_text - margin
-            rect_bottom = y_text + total_text_height + margin
-            draw.rectangle([(0, rect_top), (w, rect_bottom)], fill=(0, 0, 0, 128))
+        margin = 30
+        rect_top = y_text - margin
+        rect_bottom = y_text + total_text_height + margin
+        draw.rectangle([(0, rect_top), (w, rect_bottom)], fill=(0, 0, 0, 128))
 
-            for line in lines:
-                bbox = draw.textbbox((0, 0), line, font=font)
-                text_width = bbox[2] - bbox[0]
-                x_text = (w - text_width) // 2
-                draw.text((x_text, y_text), line, font=font, fill="white", stroke_width=2, stroke_fill="black")
-                y_text += line_height
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            text_width = bbox[2] - bbox[0]
+            x_text = (w - text_width) // 2
+            draw.text((x_text, y_text), line, font=font, fill="white", stroke_width=2, stroke_fill="black")
+            y_text += line_height
 
-            frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            out.write(frame)
+        frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        out.write(frame)
 
-        out.release()
-        temp_output = output_path.replace('.mp4', '_temp.mp4')
-        subprocess.run([
-            'ffmpeg', '-y', '-i', output_path, '-i', audio_path,
-            '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
-            '-shortest', temp_output
-        ], check=True)
-        os.replace(temp_output, output_path)
-    except Exception as e:
-        log(f"Erreur segment vidéo : {e}")
-        raise HTTPException(status_code=500, detail="Erreur création segment vidéo")
+    out.release()
+
+    temp_output = output_path.replace('.mp4', '_temp.mp4')
+    subprocess.run([
+        'ffmpeg', '-y', '-i', output_path, '-i', audio_path,
+        '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
+        '-shortest', temp_output
+    ], check=True)
+    os.replace(temp_output, output_path)
 
 def concatenate_videos(video_paths: list, output_path: str):
-    try:
-        list_file = os.path.join(os.path.dirname(output_path), 'file_list.txt')
-        with open(list_file, 'w') as f:
-            for path in video_paths:
-                f.write(f"file '{os.path.abspath(path)}'\n")
-        subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file, '-c', 'copy', output_path], check=True)
-        os.remove(list_file)
-    except Exception as e:
-        log(f"Erreur concaténation : {e}")
-        raise HTTPException(status_code=500, detail="Erreur concaténation des vidéos")
+    list_file = os.path.join(os.path.dirname(output_path), 'file_list.txt')
+    with open(list_file, 'w') as f:
+        for path in video_paths:
+            f.write(f"file '{os.path.abspath(path)}'\n")
+    subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file, '-c', 'copy', output_path], check=True)
+    os.remove(list_file)
 
 @app.get("/progress")
 async def progress_endpoint(request: Request, prompt: str):
@@ -177,29 +170,34 @@ async def progress_endpoint(request: Request, prompt: str):
     video_output = os.path.join(temp_dir, "final_video.mp4")
 
     async def event_generator():
-        sections = split_prompt(prompt)
-        total = len(sections)
+        grouped_sections = split_prompt_limited(prompt, max_images=10)
+        total_texts = sum(len(group) for group in grouped_sections)
         video_segments = []
+        processed_count = 0
 
         try:
-            for i, section in enumerate(sections):
-                yield f"data: {json.dumps({'progress': int((i / total) * 100), 'status': 'processing'})}\n\n"
-                start_time = time.time()
-                img = generate_image(section)
-                audio_path = os.path.join(temp_dir, f"audio_{i}.mp3")
-                generate_audio(section, output_path=audio_path)
-                segment_path = os.path.join(temp_dir, f"segment_{i}.mp4")
-                create_video_segment(img, audio_path, section, segment_path)
-                video_segments.append(segment_path)
-                log(f"Section {i+1}/{total} générée en {time.time() - start_time:.2f}s")
-                yield f"data: {json.dumps({'progress': int(((i+1) / total) * 100), 'status': 'processing'})}\n\n"
-                await asyncio.sleep(0.1)
+            for i, group in enumerate(grouped_sections):
+                combined_prompt = " ".join(group)
+                yield f"data: {json.dumps({'progress': int((processed_count / total_texts) * 100), 'status': 'processing'})}\n\n"
+                
+                # Générer une seule image par groupe
+                img = generate_image(combined_prompt)
+                
+                for j, text in enumerate(group):
+                    audio_path = os.path.join(temp_dir, f"audio_{i}_{j}.mp3")
+                    generate_audio(text, output_path=audio_path)
+                    segment_path = os.path.join(temp_dir, f"segment_{i}_{j}.mp4")
+                    create_video_segment(img, audio_path, text, segment_path)
+                    video_segments.append(segment_path)
+
+                    processed_count += 1
+                    yield f"data: {json.dumps({'progress': int((processed_count / total_texts) * 100), 'status': 'processing'})}\n\n"
+                    await asyncio.sleep(0.1)
 
             yield f"data: {json.dumps({'progress': 95, 'status': 'processing'})}\n\n"
             concatenate_videos(video_segments, video_output)
             yield f"data: {json.dumps({'progress': 100, 'status': 'done', 'video_id': uid})}\n\n"
         except Exception as e:
-            log(f"Erreur générale : {e}")
             yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
