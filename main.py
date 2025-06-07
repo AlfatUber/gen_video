@@ -10,7 +10,7 @@ from langdetect import detect
 from pydub import AudioSegment
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
@@ -29,24 +29,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def split_prompt_limited(prompt: str, max_images: int = 10, words_per_section: int = 5) -> list:
-    words = prompt.split()
-    sections = [" ".join(words[i:i+words_per_section]) for i in range(0, len(words), words_per_section)]
+# ========= UTILS =========
 
-    if len(sections) <= max_images:
-        return [[s] for s in sections]
-
-    # Regrouper les sections en max_images groupes (chunks)
-    chunk_size = len(sections) // max_images
-    remainder = len(sections) % max_images
-
-    grouped_sections = []
-    start = 0
-    for i in range(max_images):
-        end = start + chunk_size + (1 if i < remainder else 0)
-        grouped_sections.append(sections[start:end])
-        start = end
-    return grouped_sections
+def split_prompt_single(prompt: str) -> list:
+    return [prompt.strip()]
 
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
     encoded_prompt = requests.utils.quote(prompt)
@@ -64,7 +50,6 @@ def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
             lang = detect(text)
         except:
             lang = 'fr'
-
     tts = gTTS(text=text, lang=lang, slow=False)
     tts.save(output_path)
     return output_path
@@ -88,18 +73,13 @@ def get_line_height(draw, font):
     bbox = draw.textbbox((0, 0), "Ay", font=font)
     return bbox[3] - bbox[1] + 10
 
-def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", max_font_size=200, min_font_size=100):
-    for size in range(max_font_size, min_font_size - 1, -2):
-        try:
-            font = ImageFont.truetype(base_font_path, size)
-        except:
-            font = ImageFont.load_default()
-        lines = wrap_text(draw, text, font, max_width)
-        line_height = get_line_height(draw, font)
-        total_height = len(lines) * line_height
-        if total_height < 300:
-            return font, lines
-    return font, wrap_text(draw, text, font, max_width)
+def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", font_size=200):
+    try:
+        font = ImageFont.truetype(base_font_path, font_size)
+    except:
+        font = ImageFont.load_default()
+    lines = wrap_text(draw, text, font, max_width)
+    return font, lines
 
 def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_path: str):
     fps = 30
@@ -108,8 +88,6 @@ def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_p
     total_frames = int(audio_duration * fps)
     h, w = image.shape[:2]
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-    words = text.split()
-    word_duration = audio_duration / max(len(words), 1)
 
     for frame_idx in range(total_frames):
         current_time = frame_idx / fps
@@ -120,11 +98,9 @@ def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_p
         zoomed = zoomed[y1:y1+h, x1:x1+w]
 
         pil_img = Image.fromarray(cv2.cvtColor(zoomed, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(pil_img)
+        draw = ImageDraw.Draw(pil_img, 'RGBA')
 
-        words_to_show = int(current_time / word_duration) + 1
-        current_text = " ".join(words[:min(words_to_show, len(words))])
-        font, lines = get_font_for_text(draw, current_text, max_width=w - 100)
+        font, lines = get_font_for_text(draw, text, max_width=w - 100)
         line_height = get_line_height(draw, font)
         total_text_height = len(lines) * line_height
         y_text = h - total_text_height - 100
@@ -132,7 +108,7 @@ def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_p
         margin = 30
         rect_top = y_text - margin
         rect_bottom = y_text + total_text_height + margin
-        draw.rectangle([(0, rect_top), (w, rect_bottom)], fill=(0, 0, 0, 128))
+        draw.rectangle([(0, rect_top), (w, rect_bottom)], fill=(0, 0, 0, int(255 * 0.6)))
 
         for line in lines:
             bbox = draw.textbbox((0, 0), line, font=font)
@@ -162,6 +138,8 @@ def concatenate_videos(video_paths: list, output_path: str):
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file, '-c', 'copy', output_path], check=True)
     os.remove(list_file)
 
+# ========= ENDPOINTS =========
+
 @app.get("/progress")
 async def progress_endpoint(request: Request, prompt: str):
     uid = str(uuid.uuid4())
@@ -170,32 +148,31 @@ async def progress_endpoint(request: Request, prompt: str):
     video_output = os.path.join(temp_dir, "final_video.mp4")
 
     async def event_generator():
-        grouped_sections = split_prompt_limited(prompt, max_images=10)
-        total_texts = sum(len(group) for group in grouped_sections)
+        sections = split_prompt_single(prompt)
+        total_texts = len(sections)
         video_segments = []
         processed_count = 0
 
         try:
-            for i, group in enumerate(grouped_sections):
-                combined_prompt = " ".join(group)
+            for i, text in enumerate(sections):
                 yield f"data: {json.dumps({'progress': int((processed_count / total_texts) * 100), 'status': 'processing'})}\n\n"
-                
-                # Générer une seule image par groupe
-                img = generate_image(combined_prompt)
-                
-                for j, text in enumerate(group):
-                    audio_path = os.path.join(temp_dir, f"audio_{i}_{j}.mp3")
-                    generate_audio(text, output_path=audio_path)
-                    segment_path = os.path.join(temp_dir, f"segment_{i}_{j}.mp4")
-                    create_video_segment(img, audio_path, text, segment_path)
-                    video_segments.append(segment_path)
-
-                    processed_count += 1
-                    yield f"data: {json.dumps({'progress': int((processed_count / total_texts) * 100), 'status': 'processing'})}\n\n"
-                    await asyncio.sleep(0.1)
+                img = generate_image(text)
+                audio_path = os.path.join(temp_dir, f"audio_{i}.mp3")
+                generate_audio(text, output_path=audio_path)
+                segment_path = os.path.join(temp_dir, f"segment_{i}.mp4")
+                create_video_segment(img, audio_path, text, segment_path)
+                video_segments.append(segment_path)
+                processed_count += 1
+                yield f"data: {json.dumps({'progress': int((processed_count / total_texts) * 100), 'status': 'processing'})}\n\n"
+                await asyncio.sleep(0.1)
 
             yield f"data: {json.dumps({'progress': 95, 'status': 'processing'})}\n\n"
             concatenate_videos(video_segments, video_output)
+
+            # Attendre que le fichier soit pleinement écrit
+            while not os.path.exists(video_output) or os.path.getsize(video_output) < 1_000_000:
+                await asyncio.sleep(0.1)
+
             yield f"data: {json.dumps({'progress': 100, 'status': 'done', 'video_id': uid})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
@@ -208,13 +185,16 @@ async def get_video(video_id: str):
     video_path = os.path.join(folder_path, "final_video.mp4")
     if not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail="Vidéo introuvable")
+    return FileResponse(video_path, media_type="video/mp4", filename="tiktok_video.mp4")
 
-    def cleanup_and_stream():
-        with open(video_path, 'rb') as f:
-            yield from f
+@app.delete("/cleanup")
+async def cleanup_video(video_id: str):
+    folder_path = os.path.join(tempfile.gettempdir(), f"video_temp_{video_id}")
+    if os.path.exists(folder_path):
         shutil.rmtree(folder_path, ignore_errors=True)
-
-    return StreamingResponse(cleanup_and_stream(), media_type="video/mp4", headers={"Content-Disposition": "attachment; filename=tiktok_video.mp4"})
+        return {"status": "deleted"}
+    else:
+        raise HTTPException(status_code=404, detail="Dossier introuvable")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
