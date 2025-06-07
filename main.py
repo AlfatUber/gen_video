@@ -39,7 +39,7 @@ def split_prompt(prompt: str, words_per_section: int = 5) -> list:
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
     try:
         url = f"https://gen-video.onrender.com/proxy_image?prompt={requests.utils.quote(prompt)}&width={width}&height={height}"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=20)
         response.raise_for_status()
     except requests.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Image proxy failed: {e}")
@@ -215,13 +215,14 @@ def proxy_image(prompt: str, width: int = 720, height: int = 1280):
     seed = random.randint(1, 1_000_000)
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
 
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération de l'image : {str(e)}")
+    for attempt in range(5): 
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            return Response(content=resp.content, media_type="image/jpeg")
+        except Exception as e:
+            print(f"[Tentative {attempt+1}/3] Erreur image : {e}")
 
-    return Response(content=resp.content, media_type="image/jpeg")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
