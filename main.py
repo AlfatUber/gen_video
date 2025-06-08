@@ -18,6 +18,7 @@ import subprocess
 import asyncio
 import json
 import uuid
+import re
 
 app = FastAPI()
 
@@ -29,10 +30,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ========= UTILS =========
-
-def split_prompt_single(prompt: str) -> list:
-    return [prompt.strip()]
+def split_prompt_sentences(prompt: str) -> list:
+    return [s.strip() for s in re.split(r'(?<=[.!?]) +', prompt) if s.strip()]
 
 def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
     encoded_prompt = requests.utils.quote(prompt)
@@ -54,32 +53,23 @@ def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
     tts.save(output_path)
     return output_path
 
-def wrap_text(draw, text, font, max_width):
-    words = text.split()
-    lines = []
-    current_line = ""
-    for word in words:
-        test_line = current_line + " " + word if current_line else word
-        if draw.textlength(test_line, font=font) <= max_width:
-            current_line = test_line
-        else:
-            lines.append(current_line)
-            current_line = word
-    if current_line:
-        lines.append(current_line)
-    return lines
-
-def get_line_height(draw, font):
-    bbox = draw.textbbox((0, 0), "Ay", font=font)
-    return bbox[3] - bbox[1] + 10
-
-def get_font_for_text(draw, text, max_width, base_font_path="arial.ttf", font_size=200):
+def get_font(font_path="arial.ttf", font_size=200):
     try:
-        font = ImageFont.truetype(base_font_path, font_size)
+        return ImageFont.truetype(font_path, font_size)
     except:
-        font = ImageFont.load_default()
-    lines = wrap_text(draw, text, font, max_width)
-    return font, lines
+        return ImageFont.load_default()
+
+def draw_text_dynamic(draw, frame_size, words, font, word_index, fade_duration_frames, current_frame, interval_words):
+    w, h = frame_size
+    y_text = h - 200
+    start_index = max(0, word_index - interval_words + 1)
+    text = " ".join(words[start_index:word_index + 1])
+    text_width = draw.textlength(text, font=font)
+    x_text = (w - text_width) // 2
+    alpha = 255
+    if current_frame % (fade_duration_frames * 2) > fade_duration_frames:
+        alpha = int(255 * (1 - ((current_frame % fade_duration_frames) / fade_duration_frames)))
+    draw.text((x_text, y_text), text, font=font, fill=(255, 255, 255, alpha), stroke_width=2, stroke_fill="black")
 
 def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_path: str):
     fps = 30
@@ -89,34 +79,28 @@ def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_p
     h, w = image.shape[:2]
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
 
-    for frame_idx in range(total_frames):
-        current_time = frame_idx / fps
-        zoom_factor = 1.0 + (0.1 * (current_time / audio_duration))
-        zoomed = cv2.resize(image, None, fx=zoom_factor, fy=zoom_factor)
-        zh, zw = zoomed.shape[:2]
-        x1, y1 = (zw - w) // 2, (zh - h) // 2
-        zoomed = zoomed[y1:y1+h, x1:x1+w]
+    words = text.split()
+    word_display_interval = max(1, int(total_frames / (len(words) + 1)))
+    fade_duration_frames = int(fps * 0.5)
+    interval_words = random.randint(6, 8)
 
-        pil_img = Image.fromarray(cv2.cvtColor(zoomed, cv2.COLOR_BGR2RGB))
+    font = get_font(font_size=180) 
+
+    zoom_factor = 1.5
+    zoom_step = (zoom_factor - 1.0) / total_frames
+
+    for i in range(total_frames):
+        current_zoom = 1.0 + zoom_step * i
+        zoomed_frame = cv2.resize(image, None, fx=current_zoom, fy=current_zoom)
+        zh, zw = zoomed_frame.shape[:2]
+        crop_x = (zw - w) // 2
+        crop_y = (zh - h) // 2
+        frame = zoomed_frame[crop_y:crop_y + h, crop_x:crop_x + w]
+
+        pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil_img, 'RGBA')
-
-        font, lines = get_font_for_text(draw, text, max_width=w - 100)
-        line_height = get_line_height(draw, font)
-        total_text_height = len(lines) * line_height
-        y_text = h - total_text_height - 100
-
-        margin = 30
-        rect_top = y_text - margin
-        rect_bottom = y_text + total_text_height + margin
-        draw.rectangle([(0, rect_top), (w, rect_bottom)], fill=(0, 0, 0, int(255 * 0.6)))
-
-        for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            text_width = bbox[2] - bbox[0]
-            x_text = (w - text_width) // 2
-            draw.text((x_text, y_text), line, font=font, fill="white", stroke_width=2, stroke_fill="black")
-            y_text += line_height
-
+        current_word = min(len(words) - 1, i // word_display_interval)
+        draw_text_dynamic(draw, (w, h), words, font, current_word, fade_duration_frames, i, interval_words)
         frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         out.write(frame)
 
@@ -138,8 +122,6 @@ def concatenate_videos(video_paths: list, output_path: str):
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file, '-c', 'copy', output_path], check=True)
     os.remove(list_file)
 
-# ========= ENDPOINTS =========
-
 @app.get("/progress")
 async def progress_endpoint(request: Request, prompt: str):
     uid = str(uuid.uuid4())
@@ -148,7 +130,7 @@ async def progress_endpoint(request: Request, prompt: str):
     video_output = os.path.join(temp_dir, "final_video.mp4")
 
     async def event_generator():
-        sections = split_prompt_single(prompt)
+        sections = split_prompt_sentences(prompt)
         total_texts = len(sections)
         video_segments = []
         processed_count = 0
@@ -169,7 +151,6 @@ async def progress_endpoint(request: Request, prompt: str):
             yield f"data: {json.dumps({'progress': 95, 'status': 'processing'})}\n\n"
             concatenate_videos(video_segments, video_output)
 
-            # Attendre que le fichier soit pleinement écrit
             while not os.path.exists(video_output) or os.path.getsize(video_output) < 1_000_000:
                 await asyncio.sleep(0.1)
 
