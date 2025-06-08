@@ -53,11 +53,13 @@ def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
     tts.save(output_path)
     return output_path
 
-def get_font(font_path="arial.ttf", font_size=200):
+def get_font(font_path="DejaVuSans-Bold.ttf", font_size=200):
     try:
         return ImageFont.truetype(font_path, font_size)
-    except:
+    except Exception as e:
+        print(f"[Font Load Error] {e}")
         return ImageFont.load_default()
+
 
 def draw_text_dynamic(draw, frame_size, words, font, word_index, fade_duration_frames, current_frame, interval_words):
     w, h = frame_size
