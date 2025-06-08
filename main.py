@@ -53,7 +53,7 @@ def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
     tts.save(output_path)
     return output_path
 
-def get_font(font_path="DejaVuSans-Bold.ttf", font_size=200):
+def get_font(font_path="DejaVuSans-Bold.ttf", font_size=80):
     try:
         return ImageFont.truetype(font_path, font_size)
     except Exception as e:
@@ -86,7 +86,7 @@ def create_video_segment(image: np.ndarray, audio_path: str, text: str, output_p
     fade_duration_frames = int(fps * 0.5)
     interval_words = random.randint(6, 8)
 
-    font = get_font(font_size=180) 
+    font = get_font(font_size=80) 
 
     zoom_factor = 1.5
     zoom_step = (zoom_factor - 1.0) / total_frames
