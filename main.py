@@ -179,5 +179,35 @@ async def cleanup_video(video_id: str):
     else:
         raise HTTPException(status_code=404, detail="Dossier introuvable")
 
+@app.get("/list")
+async def list_videos():
+    temp_dir = tempfile.gettempdir()
+    videos = []
+    for folder in os.listdir(temp_dir):
+        if folder.startswith("video_temp_"):
+            folder_path = os.path.join(temp_dir, folder)
+            video_path = os.path.join(folder_path, "final_video.mp4")
+            if os.path.exists(video_path):
+                videos.append({
+                    "video_id": folder.replace("video_temp_", ""),
+                    "path": video_path,
+                    "size_MB": round(os.path.getsize(video_path) / (1024 * 1024), 2)
+                })
+    return {"videos": videos}
+
+@app.delete("/delete_all")
+async def delete_all_videos():
+    temp_dir = tempfile.gettempdir()
+    deleted = 0
+    for folder in os.listdir(temp_dir):
+        if folder.startswith("video_temp_"):
+            folder_path = os.path.join(temp_dir, folder)
+            try:
+                shutil.rmtree(folder_path)
+                deleted += 1
+            except Exception as e:
+                print(f"Erreur suppression {folder_path} : {e}")
+    return {"deleted_folders": deleted}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
