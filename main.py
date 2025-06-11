@@ -37,11 +37,61 @@ def generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndar
     encoded_prompt = requests.utils.quote(prompt)
     seed = random.randint(1, 1_000_000)
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={seed}"
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Image generation failed")
-    image = np.array(Image.open(BytesIO(response.content)))
-    return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        image = np.array(Image.open(BytesIO(response.content)))
+        return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        print(f"[Pollinations Failed] {e} → trying fallback...")
+        return fallback_generate_image(prompt, width, height)
+
+
+def fallback_generate_image(prompt: str, width: int = 720, height: int = 1280) -> np.ndarray:
+    conn = http.client.HTTPSConnection("ai-image-generator-free.p.rapidapi.com")
+    payload = json.dumps({
+        "prompt": prompt,
+        "negativePrompt": "",
+        "guidancescale": 7.5,
+        "style": "(No style)"
+    })
+    headers = {
+        'x-rapidapi-key': "517944b089msh59e42d33aa16554p1f948ejsn4c371bb42492",
+        'x-rapidapi-host': "ai-image-generator-free.p.rapidapi.com",
+        'Content-Type': "application/json"
+    }
+    
+    conn.request("POST", "/generate", payload, headers)
+    res = conn.getresponse()
+    if res.status != 200:
+        raise HTTPException(status_code=500, detail="Fallback image generation failed")
+    
+    data = res.read()
+    response_json = json.loads(data.decode("utf-8"))
+    base64_data_url = response_json.get('data', [None])[0]
+
+    if not base64_data_url or not base64_data_url.startswith("data:image"):
+        raise HTTPException(status_code=500, detail="Fallback API returned invalid image data")
+
+    header, encoded = base64_data_url.split(",", 1)
+    image_data = base64.b64decode(encoded)
+    img = Image.open(BytesIO(image_data)).convert("RGB")
+
+    w, h = img.size
+    target_ratio = width / height
+    current_ratio = w / h
+    if current_ratio > target_ratio:
+        new_width = int(h * target_ratio)
+        left = (w - new_width) // 2
+        img = img.crop((left, 0, left + new_width, h))
+    else:
+        new_height = int(w / target_ratio)
+        top = (h - new_height) // 2
+        img = img.crop((0, top, w, top + new_height))
+
+    img = img.resize((width, height), Image.Resampling.LANCZOS)
+    return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
 
 def generate_audio(text: str, lang: str = None, output_path: str = None) -> str:
     if lang is None:
