@@ -19,6 +19,8 @@ import asyncio
 import json
 import uuid
 import re
+import http.client
+import base64
 
 app = FastAPI()
 
